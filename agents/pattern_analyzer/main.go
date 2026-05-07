@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"strconv"
 	"os/signal"
 	"syscall"
 	"time"
@@ -165,8 +166,10 @@ func (a *Analyzer) checkAmountDeviation(tx shared.Transaction) float64 {
 
 	var sum, count float64
 	for _, v := range vals {
-		var amount float64
-		fmt.Sscanf(v, "%f", &amount)
+		amount, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			continue
+		}
 		sum += amount
 		count++
 	}
