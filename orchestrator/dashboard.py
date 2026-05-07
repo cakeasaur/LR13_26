@@ -1,6 +1,5 @@
 import json
 import os
-import time
 from datetime import datetime
 
 import pandas as pd
@@ -191,8 +190,9 @@ with right:
         st.write("Нет данных")
 
 # ── Auto-refresh ──────────────────────────────────────────────────────────────
+# meta refresh вместо time.sleep — браузер сам перезагружает страницу,
+# Python-thread остаётся свободным и UI не замораживается на 5 секунд
 st.divider()
 auto = st.checkbox("Авто-обновление каждые 5 секунд", value=False)
 if auto:
-    time.sleep(5)
-    st.rerun()
+    st.html("<meta http-equiv='refresh' content='5'>")
