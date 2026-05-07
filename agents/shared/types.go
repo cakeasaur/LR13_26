@@ -8,8 +8,7 @@ const (
 	SubjectTransactionsValidated = "transactions.validated"
 	SubjectTransactionsAnalyzed  = "transactions.analyzed"
 	SubjectTransactionsRisk      = "transactions.risk"
-	SubjectTransactionsDecision  = "transactions.decision"
-	SubjectTransactionsCompleted = "transactions.completed"
+	SubjectTransactionsDecision = "transactions.decision"
 )
 
 type Transaction struct {

@@ -58,7 +58,7 @@ class Orchestrator:
         return None
 
     async def _send_once(self, tx: Transaction) -> Decision:
-        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[tx.id] = future
 
         payload = json.dumps(tx.to_dict()).encode()
@@ -92,4 +92,4 @@ class Orchestrator:
                 log.info("Решение получено: txID=%s action=%s score=%.1f level=%s",
                          tx_id, data.get("action"), data.get("risk_score", 0), data.get("risk_level"))
         except Exception as e:
-            log.error("Ошибка обработки решения: %v", e)
+            log.error("Ошибка обработки решения: %s", e)

@@ -1,5 +1,6 @@
-import asyncio
+import json
 import logging
+import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -22,7 +23,8 @@ async def lifespan(app: FastAPI):
     global orch, rdb
     orch = Orchestrator()
     await orch.connect()
-    rdb = aioredis.from_url("redis://localhost:6379", decode_responses=True)
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+    rdb = aioredis.from_url(redis_url, decode_responses=True)
     log.info("API запущен")
     yield
     await orch.disconnect()
@@ -106,7 +108,6 @@ async def get_decision(tx_id: str):
     if not raw:
         raise HTTPException(status_code=404, detail="Транзакция не найдена")
 
-    import json
     data = json.loads(raw)
     return DecisionResponse(**data)
 

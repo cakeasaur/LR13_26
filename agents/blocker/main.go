@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -20,9 +21,9 @@ var ctx = context.Background()
 type Blocker struct {
 	nc      *nats.Conn
 	rdb     *redis.Client
-	allowed int64
-	blocked int64
-	review  int64
+	allowed atomic.Int64
+	blocked atomic.Int64
+	review  atomic.Int64
 }
 
 func main() {
@@ -62,7 +63,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Printf("[Blocker] Завершение. Разрешено: %d, заблокировано: %d, на проверке: %d",
-		b.allowed, b.blocked, b.review)
+		b.allowed.Load(), b.blocked.Load(), b.review.Load())
 }
 
 func (b *Blocker) handleRisk(msg *nats.Msg) {
@@ -167,11 +168,11 @@ func (b *Blocker) previousBlockCount(accountID string) int64 {
 func (b *Blocker) updateCounters(action string) {
 	switch action {
 	case "ALLOW":
-		b.allowed++
+		b.allowed.Add(1)
 	case "BLOCK":
-		b.blocked++
+		b.blocked.Add(1)
 	case "REVIEW":
-		b.review++
+		b.review.Add(1)
 	}
 }
 
