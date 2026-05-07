@@ -1,76 +1,223 @@
-# Система борьбы с мошенничеством (Fraud Detection System)
+# Fraud Detection System — ЛР №13
 
-Мультиагентная распределённая система для анализа и блокировки мошеннических транзакций.
+Мультиагентная распределённая система обнаружения мошенничества.  
+Вариант 26. Повышенная сложность.
 
-## 🏗️ Архитектура
+---
 
-### Агенты (Go)
-- **TransactionCollector** — сбор и валидация транзакций
-- **PatternAnalyzer** — анализ подозрительных паттернов
-- **RiskAssessor** — вычисление risk score
-- **Blocker** — принятие решений о блокировке
+## Архитектура
 
-### Оркестратор (Python)
-- Управление pipeline
-- REST API
-- Веб-интерфейс (Streamlit)
+```mermaid
+flowchart TD
+    Client(["Клиент"])
 
-### Инфраструктура
-- **NATS** — message broker
-- **Redis** — хранение состояния и истории
-- **Jaeger** — distributed tracing
+    subgraph py["Python-сервисы"]
+        API["FastAPI\nREST API :8080"]
+        Orch["Orchestrator\npipeline + retry"]
+        Auction["AuctionCoordinator\nвыбор победителя"]
+        Auto["Autoscaler\nмасштабирование"]
+        LLM["LLM Agent\nOllama llama3.2"]
+        Dash["Streamlit\nДашборд :8501"]
+    end
 
-## 🚀 Быстрый старт
+    subgraph go["Go-агенты"]
+        TC["TransactionCollector\nвалидация"]
+        PA["PatternAnalyzer ×1..3\nпаттерны + частота"]
+        RA["RiskAssessor\nриск-скор 0–100"]
+        BL["Blocker\nALLOW / REVIEW / BLOCK"]
+    end
 
-### Требования
-- Go 1.26+
-- Python 3.9+
-- Docker & Docker Compose
+    subgraph infra["Инфраструктура (Docker)"]
+        NATS["NATS :4222\nmessage broker"]
+        Redis["Redis :6379\nсостояние + история"]
+        Jaeger["Jaeger :16686\ndistributed tracing"]
+    end
 
-### Установка
+    Client -->|"POST /transactions"| API
+    API --> Orch
 
-```bash
-# Запустить инфраструктуру
-docker-compose up -d
+    Orch -->|"transactions.incoming"| NATS
+    NATS -->|"validated"| TC
+    TC -->|"transactions.validated"| NATS
+    NATS --> Auction
 
-# Проверить статус
-docker-compose ps
+    Auction -->|"transactions.auction\n(сбор ставок 300 мс)"| NATS
+    NATS -.->|"bid {worker_id, load}"| Auction
+    Auction -->|"transactions.worker.id"| PA
+
+    PA -->|"transactions.analyzed"| NATS
+    NATS --> RA
+    RA -->|"transactions.risk"| NATS
+    NATS --> BL
+    BL -->|"transactions.decision"| NATS
+
+    NATS -->|"decision"| Orch
+    Orch -->|"DecisionResponse"| Client
+
+    NATS --> LLM
+    LLM -->|"explanation:tx_id"| Redis
+    BL -->|"decision:tx_id\nstats:action:*"| Redis
+    RA -->|"risk:tx_id"| Redis
+    PA -->|"freq:* amounts:*"| Redis
+
+    Auto -->|"autoscale:pending"| Redis
+    Auto -.->|"spawn / kill"| PA
+
+    Dash -->|"read"| Redis
+
+    TC & PA & RA & BL -->|"OTel gRPC"| Jaeger
 ```
 
-### Доступные сервисы
-- NATS: `nats://localhost:4222`
-- NATS WebUI: http://localhost:8222
-- Redis: `localhost:6379`
-- Jaeger UI: http://localhost:16686
+---
 
-## 📁 Структура проекта
+## Компоненты
+
+### Go-агенты
+
+| Агент | Тема (вход) | Тема (выход) | Задача |
+|---|---|---|---|
+| TransactionCollector | `transactions.incoming` | `transactions.validated` | Валидация полей, валюты, суммы, давности |
+| PatternAnalyzer | `transactions.worker.{id}` | `transactions.analyzed` | Частота, отклонение суммы, время суток, large_amount |
+| RiskAssessor | `transactions.analyzed` | `transactions.risk` | Взвешенный риск-скор (0–100): частота×0.3 + сумма×0.25 + паттерны×0.25 + гео×0.1 + время×0.1 |
+| Blocker | `transactions.risk` | `transactions.decision` | ALLOW / REVIEW / BLOCK по порогам LOW/MEDIUM/HIGH/CRITICAL |
+
+### Python-сервисы
+
+| Сервис | Описание |
+|---|---|
+| **Orchestrator** | Отправляет транзакцию в pipeline, ждёт решение (timeout 30 с, retry ×3) |
+| **AuctionCoordinator** | Перехватывает `transactions.validated`, проводит аукцион среди PatternAnalyzer-инстансов (300 мс), роутит победителю |
+| **Autoscaler** | Мониторит `autoscale:pending` в Redis каждые 5 с; если > 5 — запускает доп. агентов (max +2), если < 2 — останавливает |
+| **LLM Agent** | Подписывается на `transactions.decision`, генерирует объяснение через Ollama llama3.2, сохраняет в Redis |
+| **Streamlit Dashboard** | Метрики ALLOW/BLOCK/REVIEW, таблица последних транзакций, LLM-объяснение по клику, статус autoscaler/auction |
+
+### Инфраструктура
+
+| Сервис | Порты | Описание |
+|---|---|---|
+| NATS | 4222, 8222 | Message broker (core NATS + JetStream) |
+| Redis | 6379 | Состояние агентов, история, объяснения |
+| Jaeger | 16686, 4317 | Distributed tracing (OTLP gRPC) |
+
+---
+
+## Быстрый старт
+
+### Требования
+
+- Go 1.22+
+- Python 3.11+
+- Docker + Docker Compose
+- Ollama (установлен через `brew install ollama`)
+
+### Запуск
+
+```bash
+# 1. Инфраструктура
+make run-infra
+
+# 2. Собрать и запустить Go-агентов
+make run-agents
+
+# 3. REST API
+make run-api          # http://localhost:8080/docs
+
+# 4. Координатор аукциона (отдельный терминал)
+make run-auction
+
+# 5. Автоскейлер (отдельный терминал)
+make run-autoscaler
+
+# 6. LLM-агент (отдельный терминал)
+make run-llm
+
+# 7. Дашборд (отдельный терминал)
+make run-dashboard    # http://localhost:8501
+```
+
+### Тесты
+
+```bash
+make test             # Go + Python
+make test-go          # только Go
+make test-py          # только Python (pytest)
+```
+
+---
+
+## API
+
+| Метод | Путь | Описание |
+|---|---|---|
+| `POST` | `/transactions` | Отправить транзакцию на проверку |
+| `GET` | `/transactions/{id}` | Получить решение по ID |
+| `GET` | `/transactions/{id}/explanation` | LLM-объяснение решения |
+| `GET` | `/stats` | Счётчики ALLOW / BLOCK / REVIEW |
+| `GET` | `/autoscale` | Статус автомасштабирования |
+| `GET` | `/health` | Health check |
+
+### Пример запроса
+
+```bash
+curl -X POST http://localhost:8080/transactions \
+  -H 'Content-Type: application/json' \
+  -d '{"account_id":"acc-001","amount":15000,"currency":"USD","country_code":"NG"}'
+```
+
+```json
+{
+  "transaction_id": "550e8400-e29b-41d4-a716-446655440000",
+  "account_id": "acc-001",
+  "action": "BLOCK",
+  "risk_score": 88.5,
+  "risk_level": "CRITICAL",
+  "reasons": ["large_amount", "critical_risk_score:88.5"],
+  "timestamp": "2026-05-07T12:00:00Z"
+}
+```
+
+---
+
+## Мониторинг
+
+| Инструмент | URL |
+|---|---|
+| Jaeger UI | http://localhost:16686 |
+| NATS Monitoring | http://localhost:8222 |
+| Streamlit Dashboard | http://localhost:8501 |
+| FastAPI Swagger | http://localhost:8080/docs |
+
+---
+
+## Структура проекта
 
 ```
 fraud-detection-system/
-├── agents/          # Go агенты
-├── orchestrator/    # Python оркестратор и API
-├── docker/         # Docker конфигурации
-├── tests/          # Тесты
-├── docs/           # Документация
-└── docker-compose.yml
+├── agents/
+│   ├── shared/                  # общие типы и OTel-инициализация
+│   ├── transaction_collector/   # Go-агент + тесты
+│   ├── pattern_analyzer/        # Go-агент + тесты (аукцион)
+│   ├── risk_assessor/           # Go-агент + тесты
+│   └── blocker/                 # Go-агент
+├── orchestrator/
+│   ├── api.py                   # FastAPI REST API
+│   ├── orchestrator.py          # pipeline + pending-трекинг
+│   ├── auction.py               # AuctionCoordinator
+│   ├── autoscaler.py            # Autoscaler
+│   ├── llm_agent.py             # LLM Agent (Ollama)
+│   ├── dashboard.py             # Streamlit Dashboard
+│   ├── models.py                # Transaction / Decision dataclasses
+│   ├── test_models.py           # pytest
+│   ├── test_llm_agent.py        # pytest
+│   ├── test_autoscaler.py       # pytest
+│   └── requirements.txt
+├── docker-compose.yml           # NATS + Redis + Jaeger
+├── Makefile
+└── go.mod
 ```
 
-## 📋 Задания
+---
 
-### Блок 1: Основная система (обязательно)
-- [ ] 4 микросервиса на Go (NATS)
-- [ ] Pipeline: транзакция → анализ → риск → блокировка
-- [ ] Redis для состояния
+## Стек
 
-### Блок 2: Продвинутые функции
-- [ ] Jaeger + OpenTelemetry
-- [ ] Автомасштабирование
-- [ ] Аукцион задач
-- [ ] LLM-агент
-- [ ] Веб-панель (Streamlit)
-
-## 🔗 Ссылки
-
-- [NATS Documentation](https://docs.nats.io/)
-- [Go NATS Client](https://github.com/nats-io/nats.go)
-- [OpenTelemetry Go](https://opentelemetry.io/docs/instrumentation/go/)
+`Go 1.26` · `Python 3.13` · `NATS` · `Redis` · `Jaeger/OTel` · `FastAPI` · `Streamlit` · `Ollama llama3.2`
