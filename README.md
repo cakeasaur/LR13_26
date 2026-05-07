@@ -37,13 +37,14 @@ flowchart TD
     API --> Orch
 
     Orch -->|"transactions.incoming"| NATS
-    NATS -->|"validated"| TC
+    NATS -->|"transactions.incoming"| TC
     TC -->|"transactions.validated"| NATS
     NATS --> Auction
 
     Auction -->|"transactions.auction\n(сбор ставок 300 мс)"| NATS
     NATS -.->|"bid {worker_id, load}"| Auction
-    Auction -->|"transactions.worker.id"| PA
+    Auction -->|"transactions.worker.{id}"| NATS
+    NATS --> PA
 
     PA -->|"transactions.analyzed"| NATS
     NATS --> RA
@@ -60,7 +61,7 @@ flowchart TD
     RA -->|"risk:tx_id"| Redis
     PA -->|"freq:* amounts:*"| Redis
 
-    Auto -->|"autoscale:pending"| Redis
+    Redis -.->|"autoscale:pending"| Auto
     Auto -.->|"spawn / kill"| PA
 
     Dash -->|"read"| Redis
@@ -95,7 +96,7 @@ flowchart TD
 
 | Сервис | Порты | Описание |
 |---|---|---|
-| NATS | 4222, 8222 | Message broker (core NATS + JetStream) |
+| NATS | 4222, 8222 | Message broker (core NATS, QueueSubscribe) |
 | Redis | 6379 | Состояние агентов, история, объяснения |
 | Jaeger | 16686, 4317 | Distributed tracing (OTLP gRPC) |
 
@@ -105,7 +106,7 @@ flowchart TD
 
 ### Требования
 
-- Go 1.22+
+- Go 1.26+
 - Python 3.11+
 - Docker + Docker Compose
 - Ollama (установлен через `brew install ollama`)
@@ -196,7 +197,7 @@ fraud-detection-system/
 ├── agents/
 │   ├── shared/                  # общие типы и OTel-инициализация
 │   ├── transaction_collector/   # Go-агент + тесты
-│   ├── pattern_analyzer/        # Go-агент + тесты (аукцион)
+│   ├── pattern_analyzer/        # Go-агент (аукцион: bid + worker inbox)
 │   ├── risk_assessor/           # Go-агент + тесты
 │   └── blocker/                 # Go-агент
 ├── orchestrator/
