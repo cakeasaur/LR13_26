@@ -1,6 +1,6 @@
 services:
   nats:
-    image: nats:latest
+    image: nats:2-alpine
     container_name: fraud_nats
     ports:
       - "4222:4222"
@@ -15,9 +15,15 @@ services:
       - nats_data:/data
     networks:
       - fraud-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
   redis:
-    image: redis:latest
+    image: redis:7-alpine
     container_name: fraud_redis
     ports:
       - "6379:6379"
@@ -26,6 +32,12 @@ services:
       - redis_data:/data
     networks:
       - fraud-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
 
   jaeger:
     image: jaegertracing/all-in-one:latest
@@ -39,6 +51,12 @@ services:
       - COLLECTOR_OTLP_ENABLED=true
     networks:
       - fraud-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:14269/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
 volumes:
   nats_data:
