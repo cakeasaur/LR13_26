@@ -24,7 +24,6 @@ import (
 )
 
 var (
-	ctx         = context.Background()
 	tracer      trace.Tracer
 	workerID    string
 	currentLoad atomic.Int64
@@ -32,6 +31,7 @@ var (
 )
 
 type Analyzer struct {
+	ctx context.Context
 	nc  *nats.Conn
 	rdb *redis.Client
 }
@@ -43,6 +43,9 @@ type bid struct {
 
 func main() {
 	workerID = uuid.New().String()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	var shutdown func()
 	var err error
@@ -75,7 +78,7 @@ func main() {
 
 	log.Printf("[PatternAnalyzer] workerID=%s NATS=%s Redis=%s", workerID[:8], natsURL, redisAddr)
 
-	a := &Analyzer{nc: nc, rdb: rdb}
+	a := &Analyzer{ctx: ctx, nc: nc, rdb: rdb}
 
 	// Auction: respond to bid requests
 	auctionSub, err := nc.Subscribe(shared.SubjectTransactionsAuction, func(msg *nats.Msg) {
@@ -112,13 +115,14 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
+	cancel()
 
 	log.Printf("[PatternAnalyzer] Завершение. workerID=%s обработано=%d",
 		workerID[:8], processed.Load())
 }
 
 func (a *Analyzer) handleValidated(msg *nats.Msg) {
-	spanCtx, span := tracer.Start(context.Background(), "transaction.analyze_patterns")
+	spanCtx, span := tracer.Start(a.ctx, "transaction.analyze_patterns")
 	defer span.End()
 
 	var vr shared.ValidationResult
@@ -210,11 +214,11 @@ func (a *Analyzer) checkFrequency(tx shared.Transaction) float64 {
 	window := float64(60)
 
 	pipe := a.rdb.Pipeline()
-	pipe.ZAdd(ctx, key, &redis.Z{Score: now, Member: tx.ID})
-	pipe.ZRemRangeByScore(ctx, key, "-inf", fmt.Sprintf("%f", now-window))
-	pipe.ZCard(ctx, key)
-	pipe.Expire(ctx, key, 5*time.Minute)
-	cmds, err := pipe.Exec(ctx)
+	pipe.ZAdd(a.ctx, key, &redis.Z{Score: now, Member: tx.ID})
+	pipe.ZRemRangeByScore(a.ctx, key, "-inf", fmt.Sprintf("%f", now-window))
+	pipe.ZCard(a.ctx, key)
+	pipe.Expire(a.ctx, key, 5*time.Minute)
+	cmds, err := pipe.Exec(a.ctx)
 	if err != nil {
 		log.Printf("[PatternAnalyzer] WARN: Redis pipeline error: %v", err)
 		return 0
@@ -227,11 +231,11 @@ func (a *Analyzer) checkFrequency(tx shared.Transaction) float64 {
 func (a *Analyzer) checkAmountDeviation(tx shared.Transaction) float64 {
 	key := fmt.Sprintf("amounts:%s", tx.AccountID)
 
-	a.rdb.LPush(ctx, key, tx.Amount)
-	a.rdb.LTrim(ctx, key, 0, 99)
-	a.rdb.Expire(ctx, key, 24*time.Hour)
+	a.rdb.LPush(a.ctx, key, tx.Amount)
+	a.rdb.LTrim(a.ctx, key, 0, 99)
+	a.rdb.Expire(a.ctx, key, 24*time.Hour)
 
-	vals, err := a.rdb.LRange(ctx, key, 0, -1).Result()
+	vals, err := a.rdb.LRange(a.ctx, key, 0, -1).Result()
 	if err != nil || len(vals) < 3 {
 		return 0
 	}
@@ -256,9 +260,9 @@ func (a *Analyzer) checkAmountDeviation(tx shared.Transaction) float64 {
 func (a *Analyzer) saveToHistory(tx shared.Transaction) {
 	key := fmt.Sprintf("tx:history:%s", tx.AccountID)
 	data, _ := json.Marshal(tx)
-	a.rdb.LPush(ctx, key, string(data))
-	a.rdb.LTrim(ctx, key, 0, 49)
-	a.rdb.Expire(ctx, key, 48*time.Hour)
+	a.rdb.LPush(a.ctx, key, string(data))
+	a.rdb.LTrim(a.ctx, key, 0, 49)
+	a.rdb.Expire(a.ctx, key, 48*time.Hour)
 }
 
 func getEnv(key, fallback string) string {

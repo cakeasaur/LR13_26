@@ -20,12 +20,10 @@ import (
 	"github.com/sleepysweety/fraud-detection/agents/shared"
 )
 
-var (
-	ctx    = context.Background()
-	tracer trace.Tracer
-)
+var tracer trace.Tracer
 
 type Blocker struct {
+	ctx     context.Context
 	nc      *nats.Conn
 	rdb     *redis.Client
 	allowed atomic.Int64
@@ -34,6 +32,9 @@ type Blocker struct {
 }
 
 func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	var shutdown func()
 	var err error
 
@@ -65,7 +66,7 @@ func main() {
 
 	log.Printf("[Blocker] Подключён к NATS: %s, Redis: %s", natsURL, redisAddr)
 
-	b := &Blocker{nc: nc, rdb: rdb}
+	b := &Blocker{ctx: ctx, nc: nc, rdb: rdb}
 
 	sub, err := nc.QueueSubscribe(shared.SubjectTransactionsRisk, "blockers", func(msg *nats.Msg) {
 		b.handleRisk(msg)
@@ -80,12 +81,13 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
+	cancel()
 	log.Printf("[Blocker] Завершение. Разрешено: %d, заблокировано: %d, на проверке: %d",
 		b.allowed.Load(), b.blocked.Load(), b.review.Load())
 }
 
 func (b *Blocker) handleRisk(msg *nats.Msg) {
-	_, span := tracer.Start(context.Background(), "transaction.block_decision")
+	_, span := tracer.Start(b.ctx, "transaction.block_decision")
 	defer span.End()
 
 	var rr shared.RiskResult
@@ -169,26 +171,26 @@ func (b *Blocker) decide(rr shared.RiskResult) shared.Decision {
 func (b *Blocker) saveDecision(d shared.Decision) {
 	key := fmt.Sprintf("decision:%s", d.TransactionID)
 	data, _ := json.Marshal(d)
-	b.rdb.Set(ctx, key, string(data), 7*24*time.Hour)
+	b.rdb.Set(b.ctx, key, string(data), 7*24*time.Hour)
 
 	listKey := "decisions:recent"
-	b.rdb.LPush(ctx, listKey, string(data))
-	b.rdb.LTrim(ctx, listKey, 0, 499)
-	b.rdb.Expire(ctx, listKey, 24*time.Hour)
+	b.rdb.LPush(b.ctx, listKey, string(data))
+	b.rdb.LTrim(b.ctx, listKey, 0, 499)
+	b.rdb.Expire(b.ctx, listKey, 24*time.Hour)
 
-	b.rdb.Incr(ctx, fmt.Sprintf("stats:action:%s", d.Action))
-	b.rdb.Incr(ctx, fmt.Sprintf("stats:level:%s", d.RiskLevel))
+	b.rdb.Incr(b.ctx, fmt.Sprintf("stats:action:%s", d.Action))
+	b.rdb.Incr(b.ctx, fmt.Sprintf("stats:level:%s", d.RiskLevel))
 }
 
 func (b *Blocker) incrementBlockCount(accountID string) {
 	key := fmt.Sprintf("blocks:%s", accountID)
-	b.rdb.Incr(ctx, key)
-	b.rdb.Expire(ctx, key, 30*24*time.Hour)
+	b.rdb.Incr(b.ctx, key)
+	b.rdb.Expire(b.ctx, key, 30*24*time.Hour)
 }
 
 func (b *Blocker) previousBlockCount(accountID string) int64 {
 	key := fmt.Sprintf("blocks:%s", accountID)
-	count, _ := b.rdb.Get(ctx, key).Int64()
+	count, _ := b.rdb.Get(b.ctx, key).Int64()
 	return count
 }
 

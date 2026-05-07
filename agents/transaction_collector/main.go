@@ -26,6 +26,9 @@ var (
 )
 
 func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	var shutdown func()
 	var err error
 
@@ -51,7 +54,7 @@ func main() {
 	log.Printf("[CollectorAgent] Подключён к NATS: %s", natsURL)
 
 	sub, err := nc.QueueSubscribe(shared.SubjectTransactionsIncoming, "collectors", func(msg *nats.Msg) {
-		handleTransaction(nc, msg)
+		handleTransaction(ctx, nc, msg)
 	})
 	if err != nil {
 		log.Fatalf("[CollectorAgent] Ошибка подписки: %v", err)
@@ -63,13 +66,14 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
+	cancel()
 
 	log.Printf("[CollectorAgent] Завершение. Обработано: %d, отклонено: %d",
 		processedCount.Load(), rejectedCount.Load())
 }
 
-func handleTransaction(nc *nats.Conn, msg *nats.Msg) {
-	_, span := tracer.Start(context.Background(), "transaction.collect")
+func handleTransaction(ctx context.Context, nc *nats.Conn, msg *nats.Msg) {
+	_, span := tracer.Start(ctx, "transaction.collect")
 	defer span.End()
 
 	var tx shared.Transaction

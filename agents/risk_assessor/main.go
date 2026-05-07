@@ -19,10 +19,7 @@ import (
 	"github.com/sleepysweety/fraud-detection/agents/shared"
 )
 
-var (
-	ctx    = context.Background()
-	tracer trace.Tracer
-)
+var tracer trace.Tracer
 
 const (
 	weightFrequency = 0.30
@@ -37,11 +34,15 @@ const (
 )
 
 type Assessor struct {
+	ctx context.Context
 	nc  *nats.Conn
 	rdb *redis.Client
 }
 
 func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	var shutdown func()
 	var err error
 
@@ -73,7 +74,7 @@ func main() {
 
 	log.Printf("[RiskAssessor] Подключён к NATS: %s, Redis: %s", natsURL, redisAddr)
 
-	a := &Assessor{nc: nc, rdb: rdb}
+	a := &Assessor{ctx: ctx, nc: nc, rdb: rdb}
 
 	sub, err := nc.QueueSubscribe(shared.SubjectTransactionsAnalyzed, "assessors", func(msg *nats.Msg) {
 		a.handleAnalyzed(msg)
@@ -88,11 +89,12 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
+	cancel()
 	log.Println("[RiskAssessor] Завершение работы")
 }
 
 func (a *Assessor) handleAnalyzed(msg *nats.Msg) {
-	_, span := tracer.Start(context.Background(), "transaction.assess_risk")
+	_, span := tracer.Start(a.ctx, "transaction.assess_risk")
 	defer span.End()
 
 	var pr shared.PatternResult
@@ -189,7 +191,7 @@ func timeRisk(t time.Time) float64 {
 
 func (a *Assessor) accountPenalty(accountID string) float64 {
 	key := fmt.Sprintf("blocks:%s", accountID)
-	count, err := a.rdb.Get(ctx, key).Int64()
+	count, err := a.rdb.Get(a.ctx, key).Int64()
 	if err != nil {
 		return 0
 	}
@@ -202,13 +204,13 @@ func (a *Assessor) accountPenalty(accountID string) float64 {
 
 func (a *Assessor) saveRiskScore(tx shared.Transaction, score float64, level string) {
 	key := fmt.Sprintf("risk:%s", tx.ID)
-	a.rdb.HSet(ctx, key,
+	a.rdb.HSet(a.ctx, key,
 		"account_id", tx.AccountID,
 		"score", fmt.Sprintf("%.2f", score),
 		"level", level,
 		"timestamp", tx.Timestamp.Format(time.RFC3339),
 	)
-	a.rdb.Expire(ctx, key, 24*time.Hour)
+	a.rdb.Expire(a.ctx, key, 24*time.Hour)
 }
 
 func riskLevel(score float64) string {
