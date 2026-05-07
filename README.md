@@ -219,6 +219,21 @@ fraud-detection-system/
 
 ---
 
+## Выполненные задания
+
+| № | Задание | Реализация | Статус |
+|---|---------|------------|--------|
+| 1 | **Система агентов на Go** | 4 микросервиса: TransactionCollector, PatternAnalyzer, RiskAssessor, Blocker — каждый отдельный бинарник, общение через NATS | ✅ |
+| 2 | **Цепочки задач (pipeline)** | `incoming → validated → auction → worker.{id} → analyzed → risk → decision`; оркестратор на Python с retry ×3 и timeout 30 с | ✅ |
+| 3 | **Распределённая трассировка (Jaeger)** | OpenTelemetry + OTLP gRPC во всех 4 агентах; дочерние spans для каждой проверки; Jaeger в Docker на `:16686` | ✅ |
+| 4 | **Агент с состоянием (Redis)** | PatternAnalyzer хранит частоту транзакций (sorted set) и историю сумм (list); Blocker — историю блокировок; при перезапуске состояние восстанавливается | ✅ |
+| 5 | **Динамическое масштабирование** | Autoscaler мониторит `autoscale:pending` в Redis каждые 5 с; при > 5 запускает доп. инстансы агентов (max +2), при < 2 — останавливает | ✅ |
+| 6 | **Аукционное распределение задач** | AuctionCoordinator перехватывает validated-транзакции, собирает ставки от PatternAnalyzer-инстансов 300 мс, роутит победителю с минимальной нагрузкой | ✅ |
+| 7 | **Интеграция LLM-агента** | Python-агент подписывается на решения, генерирует объяснение через Ollama llama3.2, сохраняет в Redis; доступно через `GET /transactions/{id}/explanation` | ✅ |
+| 8 | **Веб-интерфейс мониторинга** | Streamlit Dashboard `:8501` — метрики ALLOW/BLOCK/REVIEW, таблица транзакций, LLM-объяснение по клику, статус autoscaler и аукциона, авто-обновление каждые 5 с | ✅ |
+
+---
+
 ## Стек
 
 `Go 1.26` · `Python 3.13` · `NATS` · `Redis` · `Jaeger/OTel` · `FastAPI` · `Streamlit` · `Ollama llama3.2`
