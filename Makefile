@@ -1,6 +1,6 @@
 BIN_DIR := bin
 
-.PHONY: all build clean run-infra stop-infra
+.PHONY: all build clean run-infra stop-infra run-agents run-api run-demo
 
 all: build
 
@@ -20,3 +20,16 @@ run-infra:
 
 stop-infra:
 	docker-compose down
+
+run-agents: build
+	$(BIN_DIR)/transaction_collector &
+	$(BIN_DIR)/pattern_analyzer &
+	$(BIN_DIR)/risk_assessor &
+	$(BIN_DIR)/blocker &
+	@echo "✅ Все агенты запущены в фоне"
+
+run-api:
+	cd orchestrator && uvicorn api:app --host 0.0.0.0 --port 8080 --reload
+
+run-demo:
+	cd orchestrator && python3 main.py
