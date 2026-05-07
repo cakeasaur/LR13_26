@@ -22,11 +22,13 @@ stop-infra:
 	docker-compose down
 
 run-agents: build
-	$(BIN_DIR)/transaction_collector &
-	$(BIN_DIR)/pattern_analyzer &
-	$(BIN_DIR)/risk_assessor &
-	$(BIN_DIR)/blocker &
-	@echo "✅ Все агенты запущены в фоне"
+	@trap 'kill 0' INT TERM EXIT; \
+	$(BIN_DIR)/transaction_collector & \
+	$(BIN_DIR)/pattern_analyzer & \
+	$(BIN_DIR)/risk_assessor & \
+	$(BIN_DIR)/blocker & \
+	echo "✅ Все агенты запущены — Ctrl+C для остановки всех"; \
+	wait
 
 run-api:
 	cd orchestrator && uvicorn api:app --host 0.0.0.0 --port 8080 --reload
@@ -41,7 +43,7 @@ run-llm:
 	cd orchestrator && python3 llm_agent.py
 
 run-dashboard:
-	cd orchestrator && streamlit run dashboard.py --server.port 8501
+	cd orchestrator && streamlit run dashboard.py --server.port 8501 --browser.gatherUsageStats false
 
 test-go:
 	go test ./agents/... -v
