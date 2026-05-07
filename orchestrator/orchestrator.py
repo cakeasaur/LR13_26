@@ -63,7 +63,10 @@ class Orchestrator:
         self._pending[tx.id] = future
 
         if self._redis:
-            await self._redis.incr("autoscale:pending")
+            try:
+                await self._redis.incr("autoscale:pending")
+            except Exception as e:
+                log.warning("Redis incr autoscale:pending failed: %s", e)
 
         payload = json.dumps(tx.to_dict()).encode()
         await self.nc.publish(SUBJECT_INCOMING, payload)
@@ -85,7 +88,10 @@ class Orchestrator:
         finally:
             self._pending.pop(tx.id, None)
             if self._redis:
-                await self._redis.decr("autoscale:pending")
+                try:
+                    await self._redis.decr("autoscale:pending")
+                except Exception as e:
+                    log.warning("Redis decr autoscale:pending failed: %s", e)
 
     async def _on_decision(self, msg):
         try:

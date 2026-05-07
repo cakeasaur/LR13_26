@@ -97,8 +97,8 @@ func main() {
 	workerSubject := shared.SubjectTransactionsWorkerPrefix + workerID
 	workerSub, err := nc.Subscribe(workerSubject, func(msg *nats.Msg) {
 		currentLoad.Add(1)
+		defer currentLoad.Add(-1)
 		a.handleValidated(msg)
-		currentLoad.Add(-1)
 		processed.Add(1)
 	})
 	if err != nil {
