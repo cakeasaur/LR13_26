@@ -43,7 +43,7 @@ def fetch_recent(r: redis.Redis) -> list[dict]:
 
 
 def fetch_autoscale(r: redis.Redis) -> dict:
-    pending = int(r.get("autoscale:pending") or 0)
+    pending = max(0, int(r.get("autoscale:pending") or 0))
     agents  = ["transaction_collector", "pattern_analyzer", "risk_assessor", "blocker"]
     instances = {name: int(r.get(f"autoscale:instances:{name}") or 0) for name in agents}
     return dict(pending=pending, instances=instances)
@@ -93,7 +93,6 @@ with col_title:
 with col_refresh:
     st.write("")
     if st.button("🔄 Обновить", use_container_width=True):
-        st.cache_data.clear()
         st.rerun()
 
 st.caption(f"Последнее обновление: {datetime.now().strftime('%H:%M:%S')}")
