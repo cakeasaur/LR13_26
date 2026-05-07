@@ -1,6 +1,6 @@
 BIN_DIR := bin
 
-.PHONY: all build clean run-infra stop-infra run-agents run-api run-autoscaler run-auction run-llm run-dashboard run-demo
+.PHONY: all build clean run-infra stop-infra run-agents run-api run-autoscaler run-auction run-llm run-dashboard run-demo test test-go test-py
 
 all: build
 
@@ -42,6 +42,14 @@ run-llm:
 
 run-dashboard:
 	cd orchestrator && streamlit run dashboard.py --server.port 8501
+
+test-go:
+	go test ./agents/... -v
+
+test-py:
+	cd orchestrator && pytest test_*.py -v
+
+test: test-go test-py
 
 run-demo:
 	cd orchestrator && python3 main.py

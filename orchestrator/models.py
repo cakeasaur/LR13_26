@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -16,7 +16,7 @@ class Transaction:
 
     def __post_init__(self):
         if self.timestamp is None:
-            self.timestamp = datetime.utcnow().isoformat() + "Z"
+            self.timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     def to_dict(self) -> dict:
         return {
