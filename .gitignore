@@ -1,10 +1,5 @@
 bin/
 dist/
-# Go binaries (no extension on macOS/Linux)
-transaction_collector
-pattern_analyzer
-risk_assessor
-blocker
 *.exe
 *.so
 *.dylib

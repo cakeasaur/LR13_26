@@ -4,11 +4,13 @@ import "time"
 
 // NATS subjects
 const (
-	SubjectTransactionsIncoming  = "transactions.incoming"
-	SubjectTransactionsValidated = "transactions.validated"
-	SubjectTransactionsAnalyzed  = "transactions.analyzed"
-	SubjectTransactionsRisk      = "transactions.risk"
-	SubjectTransactionsDecision = "transactions.decision"
+	SubjectTransactionsIncoming     = "transactions.incoming"
+	SubjectTransactionsValidated    = "transactions.validated"
+	SubjectTransactionsAuction      = "transactions.auction"
+	SubjectTransactionsWorkerPrefix = "transactions.worker."
+	SubjectTransactionsAnalyzed     = "transactions.analyzed"
+	SubjectTransactionsRisk         = "transactions.risk"
+	SubjectTransactionsDecision     = "transactions.decision"
 )
 
 type Transaction struct {

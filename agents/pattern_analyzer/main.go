@@ -9,9 +9,11 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -22,8 +24,11 @@ import (
 )
 
 var (
-	ctx    = context.Background()
-	tracer trace.Tracer
+	ctx         = context.Background()
+	tracer      trace.Tracer
+	workerID    string
+	currentLoad atomic.Int64
+	processed   atomic.Int64
 )
 
 type Analyzer struct {
@@ -31,7 +36,14 @@ type Analyzer struct {
 	rdb *redis.Client
 }
 
+type bid struct {
+	WorkerID string `json:"worker_id"`
+	Load     int64  `json:"load"`
+}
+
 func main() {
+	workerID = uuid.New().String()
+
 	var shutdown func()
 	var err error
 
@@ -61,24 +73,48 @@ func main() {
 		log.Fatalf("[PatternAnalyzer] Ошибка подключения к Redis: %v", err)
 	}
 
-	log.Printf("[PatternAnalyzer] Подключён к NATS: %s, Redis: %s", natsURL, redisAddr)
+	log.Printf("[PatternAnalyzer] workerID=%s NATS=%s Redis=%s", workerID[:8], natsURL, redisAddr)
 
 	a := &Analyzer{nc: nc, rdb: rdb}
 
-	sub, err := nc.QueueSubscribe(shared.SubjectTransactionsValidated, "analyzers", func(msg *nats.Msg) {
-		a.handleValidated(msg)
+	// Auction: respond to bid requests
+	auctionSub, err := nc.Subscribe(shared.SubjectTransactionsAuction, func(msg *nats.Msg) {
+		if msg.Reply == "" {
+			return
+		}
+		b := bid{WorkerID: workerID, Load: currentLoad.Load()}
+		data, _ := json.Marshal(b)
+		if err := nc.Publish(msg.Reply, data); err != nil {
+			log.Printf("[PatternAnalyzer] WARN: ошибка ставки: %v", err)
+		}
 	})
 	if err != nil {
-		log.Fatalf("[PatternAnalyzer] Ошибка подписки: %v", err)
+		log.Fatalf("[PatternAnalyzer] Ошибка подписки на auction: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer auctionSub.Unsubscribe()
 
-	log.Printf("[PatternAnalyzer] Слушает тему: %s", shared.SubjectTransactionsValidated)
+	// Worker inbox: receive won transactions
+	workerSubject := shared.SubjectTransactionsWorkerPrefix + workerID
+	workerSub, err := nc.Subscribe(workerSubject, func(msg *nats.Msg) {
+		currentLoad.Add(1)
+		a.handleValidated(msg)
+		currentLoad.Add(-1)
+		processed.Add(1)
+	})
+	if err != nil {
+		log.Fatalf("[PatternAnalyzer] Ошибка подписки на worker inbox: %v", err)
+	}
+	defer workerSub.Unsubscribe()
+
+	log.Printf("[PatternAnalyzer] Готов к аукциону: auction=%s worker=%s",
+		shared.SubjectTransactionsAuction, workerSubject)
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	log.Println("[PatternAnalyzer] Завершение работы")
+
+	log.Printf("[PatternAnalyzer] Завершение. workerID=%s обработано=%d",
+		workerID[:8], processed.Load())
 }
 
 func (a *Analyzer) handleValidated(msg *nats.Msg) {
@@ -98,6 +134,7 @@ func (a *Analyzer) handleValidated(msg *nats.Msg) {
 		attribute.String("tx.id", tx.ID),
 		attribute.String("tx.account_id", tx.AccountID),
 		attribute.Float64("tx.amount", tx.Amount),
+		attribute.String("worker.id", workerID[:8]),
 	)
 
 	result := a.analyze(spanCtx, tx)
@@ -123,8 +160,8 @@ func (a *Analyzer) handleValidated(msg *nats.Msg) {
 	}
 
 	span.SetStatus(codes.Ok, "analyzed")
-	log.Printf("[PatternAnalyzer] INFO: txID=%s suspicious=%v patterns=%v score=%.2f",
-		tx.ID, result.Suspicious, result.Patterns, result.FrequencyScore)
+	log.Printf("[PatternAnalyzer] INFO: worker=%s txID=%s suspicious=%v patterns=%v score=%.2f",
+		workerID[:8], tx.ID, result.Suspicious, result.Patterns, result.FrequencyScore)
 }
 
 func (a *Analyzer) analyze(spanCtx context.Context, tx shared.Transaction) shared.PatternResult {
