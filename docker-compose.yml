@@ -1,0 +1,43 @@
+services:
+  nats:
+    image: nats:latest
+    container_name: fraud_nats
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command:
+      - "-js"
+      - "-sd"
+      - "/data"
+    volumes:
+      - nats_data:/data
+    networks:
+      - fraud-network
+
+  redis:
+    image: redis:latest
+    container_name: fraud_redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - fraud-network
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: fraud_jaeger
+    ports:
+      - "6831:6831/udp"
+      - "16686:16686"
+    networks:
+      - fraud-network
+
+volumes:
+  nats_data:
+  redis_data:
+
+networks:
+  fraud-network:
+    driver: bridge
