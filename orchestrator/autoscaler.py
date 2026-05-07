@@ -103,9 +103,8 @@ async def main():
     scaler = Autoscaler(r)
     try:
         await scaler.run()
-    except KeyboardInterrupt:
-        scaler.shutdown()
     finally:
+        scaler.shutdown()
         await r.aclose()
 
 
