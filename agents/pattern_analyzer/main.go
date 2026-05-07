@@ -7,17 +7,24 @@ import (
 	"log"
 	"math"
 	"os"
-	"strconv"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/nats-io/nats.go"
 	"github.com/sleepysweety/fraud-detection/agents/shared"
 )
 
-var ctx = context.Background()
+var (
+	ctx    = context.Background()
+	tracer trace.Tracer
+)
 
 type Analyzer struct {
 	nc  *nats.Conn
@@ -25,6 +32,17 @@ type Analyzer struct {
 }
 
 func main() {
+	var shutdown func()
+	var err error
+
+	tracer, shutdown, err = shared.InitTracer("pattern-analyzer")
+	if err != nil {
+		log.Printf("[PatternAnalyzer] WARN: трассировка недоступна: %v", err)
+		tracer = trace.NewNoopTracerProvider().Tracer("")
+		shutdown = func() {}
+	}
+	defer shutdown()
+
 	natsURL := getEnv("NATS_URL", nats.DefaultURL)
 	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
 
@@ -64,59 +82,79 @@ func main() {
 }
 
 func (a *Analyzer) handleValidated(msg *nats.Msg) {
+	spanCtx, span := tracer.Start(context.Background(), "transaction.analyze_patterns")
+	defer span.End()
+
 	var vr shared.ValidationResult
 	if err := json.Unmarshal(msg.Data, &vr); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "invalid json")
 		log.Printf("[PatternAnalyzer] ERROR: невалидный JSON: %v", err)
 		return
 	}
 
 	tx := vr.Transaction
-	result := a.analyze(tx)
+	span.SetAttributes(
+		attribute.String("tx.id", tx.ID),
+		attribute.String("tx.account_id", tx.AccountID),
+		attribute.Float64("tx.amount", tx.Amount),
+	)
+
+	result := a.analyze(spanCtx, tx)
+
+	span.SetAttributes(
+		attribute.Bool("tx.suspicious", result.Suspicious),
+		attribute.Int("tx.pattern_count", len(result.Patterns)),
+		attribute.Float64("tx.frequency_score", result.FrequencyScore),
+	)
 
 	data, err := json.Marshal(result)
 	if err != nil {
+		span.RecordError(err)
 		log.Printf("[PatternAnalyzer] ERROR: ошибка сериализации: %v", err)
 		return
 	}
 
 	if err := a.nc.Publish(shared.SubjectTransactionsAnalyzed, data); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "publish failed")
 		log.Printf("[PatternAnalyzer] ERROR: ошибка публикации: %v", err)
 		return
 	}
 
+	span.SetStatus(codes.Ok, "analyzed")
 	log.Printf("[PatternAnalyzer] INFO: txID=%s suspicious=%v patterns=%v score=%.2f",
 		tx.ID, result.Suspicious, result.Patterns, result.FrequencyScore)
 }
 
-func (a *Analyzer) analyze(tx shared.Transaction) shared.PatternResult {
+func (a *Analyzer) analyze(spanCtx context.Context, tx shared.Transaction) shared.PatternResult {
 	var patterns []string
 	freqScore := 0.0
 	amountDev := 0.0
 
-	// 1. Частота транзакций за последние 60 секунд
+	_, freqSpan := tracer.Start(spanCtx, "check.frequency")
 	freqScore = a.checkFrequency(tx)
+	freqSpan.End()
 	if freqScore > 5 {
 		patterns = append(patterns, fmt.Sprintf("high_frequency:%.0f_per_min", freqScore))
 	}
 
-	// 2. Отклонение суммы от средней по аккаунту
+	_, amtSpan := tracer.Start(spanCtx, "check.amount_deviation")
 	amountDev = a.checkAmountDeviation(tx)
+	amtSpan.End()
 	if amountDev > 3.0 {
 		patterns = append(patterns, fmt.Sprintf("amount_deviation:%.1fx", amountDev))
 	}
 
-	// 3. Ночные транзакции (00:00 - 05:00 UTC)
 	hour := tx.Timestamp.UTC().Hour()
 	if hour >= 0 && hour < 5 {
 		patterns = append(patterns, "unusual_hour")
 	}
 
-	// 4. Крупная сумма (> 10000)
 	if tx.Amount > 10000 {
 		patterns = append(patterns, "large_amount")
 	}
 
-	// 5. Сохраняем транзакцию в историю
 	a.saveToHistory(tx)
 
 	suspicious := len(patterns) > 0
@@ -129,7 +167,6 @@ func (a *Analyzer) analyze(tx shared.Transaction) shared.PatternResult {
 	}
 }
 
-// checkFrequency возвращает кол-во транзакций от этого аккаунта за последние 60 сек
 func (a *Analyzer) checkFrequency(tx shared.Transaction) float64 {
 	key := fmt.Sprintf("freq:%s", tx.AccountID)
 	now := float64(tx.Timestamp.Unix())
@@ -150,13 +187,11 @@ func (a *Analyzer) checkFrequency(tx shared.Transaction) float64 {
 	return float64(count)
 }
 
-// checkAmountDeviation считает отклонение суммы от среднего по аккаунту
 func (a *Analyzer) checkAmountDeviation(tx shared.Transaction) float64 {
 	key := fmt.Sprintf("amounts:%s", tx.AccountID)
 
-	// Добавляем текущую сумму
 	a.rdb.LPush(ctx, key, tx.Amount)
-	a.rdb.LTrim(ctx, key, 0, 99) // последние 100 транзакций
+	a.rdb.LTrim(ctx, key, 0, 99)
 	a.rdb.Expire(ctx, key, 24*time.Hour)
 
 	vals, err := a.rdb.LRange(ctx, key, 0, -1).Result()
@@ -181,12 +216,11 @@ func (a *Analyzer) checkAmountDeviation(tx shared.Transaction) float64 {
 	return math.Abs(tx.Amount-avg) / avg
 }
 
-// saveToHistory сохраняет транзакцию в Redis для использования другими агентами
 func (a *Analyzer) saveToHistory(tx shared.Transaction) {
 	key := fmt.Sprintf("tx:history:%s", tx.AccountID)
 	data, _ := json.Marshal(tx)
 	a.rdb.LPush(ctx, key, string(data))
-	a.rdb.LTrim(ctx, key, 0, 49) // последние 50 транзакций
+	a.rdb.LTrim(ctx, key, 0, 49)
 	a.rdb.Expire(ctx, key, 48*time.Hour)
 }
 

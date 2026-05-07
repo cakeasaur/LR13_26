@@ -1,26 +1,43 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/nats-io/nats.go"
 	"github.com/sleepysweety/fraud-detection/agents/shared"
 )
 
 var (
-	processedCount int64
-	rejectedCount  int64
+	processedCount atomic.Int64
+	rejectedCount  atomic.Int64
+	tracer         trace.Tracer
 )
 
 func main() {
-	natsURL := getEnv("NATS_URL", nats.DefaultURL)
+	var shutdown func()
+	var err error
 
+	tracer, shutdown, err = shared.InitTracer("transaction-collector")
+	if err != nil {
+		log.Printf("[CollectorAgent] WARN: трассировка недоступна: %v", err)
+		tracer = trace.NewNoopTracerProvider().Tracer("")
+		shutdown = func() {}
+	}
+	defer shutdown()
+
+	natsURL := getEnv("NATS_URL", nats.DefaultURL)
 	nc, err := nats.Connect(natsURL,
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(10),
@@ -47,42 +64,61 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Printf("[CollectorAgent] Завершение. Обработано: %d, отклонено: %d", processedCount, rejectedCount)
+	log.Printf("[CollectorAgent] Завершение. Обработано: %d, отклонено: %d",
+		processedCount.Load(), rejectedCount.Load())
 }
 
 func handleTransaction(nc *nats.Conn, msg *nats.Msg) {
+	ctx, span := tracer.Start(context.Background(), "transaction.collect")
+	defer span.End()
+
 	var tx shared.Transaction
 	if err := json.Unmarshal(msg.Data, &tx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "invalid json")
 		log.Printf("[CollectorAgent] ERROR: невалидный JSON: %v", err)
-		rejectedCount++
+		rejectedCount.Add(1)
 		return
 	}
 
-	result := validate(tx)
+	span.SetAttributes(
+		attribute.String("tx.id", tx.ID),
+		attribute.String("tx.account_id", tx.AccountID),
+		attribute.Float64("tx.amount", tx.Amount),
+		attribute.String("tx.currency", tx.Currency),
+	)
+
+	result := validate(ctx, tx)
 
 	if !result.Valid {
+		span.SetAttributes(attribute.String("tx.reject_reason", result.Reason))
+		span.SetStatus(codes.Error, result.Reason)
 		log.Printf("[CollectorAgent] REJECT txID=%s reason=%s", tx.ID, result.Reason)
-		rejectedCount++
+		rejectedCount.Add(1)
 		return
 	}
 
 	data, err := json.Marshal(result)
 	if err != nil {
+		span.RecordError(err)
 		log.Printf("[CollectorAgent] ERROR: ошибка сериализации: %v", err)
 		return
 	}
 
 	if err := nc.Publish(shared.SubjectTransactionsValidated, data); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "publish failed")
 		log.Printf("[CollectorAgent] ERROR: ошибка публикации: %v", err)
 		return
 	}
 
-	processedCount++
+	span.SetStatus(codes.Ok, "validated")
+	processedCount.Add(1)
 	log.Printf("[CollectorAgent] INFO: txID=%s accountID=%s amount=%.2f %s → validated",
 		tx.ID, tx.AccountID, tx.Amount, tx.Currency)
 }
 
-func validate(tx shared.Transaction) shared.ValidationResult {
+func validate(_ context.Context, tx shared.Transaction) shared.ValidationResult {
 	if tx.ID == "" {
 		return shared.ValidationResult{Transaction: tx, Valid: false, Reason: "missing transaction id"}
 	}
@@ -107,7 +143,6 @@ func validate(tx shared.Transaction) shared.ValidationResult {
 	if time.Since(tx.Timestamp) > 24*time.Hour {
 		return shared.ValidationResult{Transaction: tx, Valid: false, Reason: "transaction too old"}
 	}
-
 	return shared.ValidationResult{Transaction: tx, Valid: true}
 }
 

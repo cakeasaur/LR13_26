@@ -11,12 +11,19 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/go-redis/redis/v8"
 	"github.com/nats-io/nats.go"
 	"github.com/sleepysweety/fraud-detection/agents/shared"
 )
 
-var ctx = context.Background()
+var (
+	ctx    = context.Background()
+	tracer trace.Tracer
+)
 
 type Blocker struct {
 	nc      *nats.Conn
@@ -27,6 +34,17 @@ type Blocker struct {
 }
 
 func main() {
+	var shutdown func()
+	var err error
+
+	tracer, shutdown, err = shared.InitTracer("blocker")
+	if err != nil {
+		log.Printf("[Blocker] WARN: трассировка недоступна: %v", err)
+		tracer = trace.NewNoopTracerProvider().Tracer("")
+		shutdown = func() {}
+	}
+	defer shutdown()
+
 	natsURL := getEnv("NATS_URL", nats.DefaultURL)
 	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
 
@@ -67,21 +85,37 @@ func main() {
 }
 
 func (b *Blocker) handleRisk(msg *nats.Msg) {
+	_, span := tracer.Start(context.Background(), "transaction.block_decision")
+	defer span.End()
+
 	var rr shared.RiskResult
 	if err := json.Unmarshal(msg.Data, &rr); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "invalid json")
 		log.Printf("[Blocker] ERROR: невалидный JSON: %v", err)
 		return
 	}
 
 	decision := b.decide(rr)
 
+	span.SetAttributes(
+		attribute.String("tx.id", decision.TransactionID),
+		attribute.String("tx.account_id", decision.AccountID),
+		attribute.String("tx.action", decision.Action),
+		attribute.Float64("tx.risk_score", decision.RiskScore),
+		attribute.String("tx.risk_level", decision.RiskLevel),
+	)
+
 	data, err := json.Marshal(decision)
 	if err != nil {
+		span.RecordError(err)
 		log.Printf("[Blocker] ERROR: ошибка сериализации: %v", err)
 		return
 	}
 
 	if err := b.nc.Publish(shared.SubjectTransactionsDecision, data); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "publish failed")
 		log.Printf("[Blocker] ERROR: ошибка публикации: %v", err)
 		return
 	}
@@ -89,6 +123,7 @@ func (b *Blocker) handleRisk(msg *nats.Msg) {
 	b.saveDecision(decision)
 	b.updateCounters(decision.Action)
 
+	span.SetStatus(codes.Ok, decision.Action)
 	log.Printf("[Blocker] INFO: txID=%s accountID=%s score=%.1f level=%s → %s",
 		decision.TransactionID, decision.AccountID, decision.RiskScore, decision.RiskLevel, decision.Action)
 }
@@ -98,7 +133,6 @@ func (b *Blocker) decide(rr shared.RiskResult) shared.Decision {
 	var reasons []string
 	action := "ALLOW"
 
-	// Собираем причины из паттернов
 	reasons = append(reasons, rr.Patterns.Patterns...)
 
 	switch rr.RiskLevel {
@@ -106,9 +140,7 @@ func (b *Blocker) decide(rr shared.RiskResult) shared.Decision {
 		action = "BLOCK"
 		reasons = append(reasons, fmt.Sprintf("critical_risk_score:%.1f", rr.RiskScore))
 		b.incrementBlockCount(tx.AccountID)
-
 	case "HIGH":
-		// Если аккаунт уже был заблокирован — блокируем сразу
 		if b.previousBlockCount(tx.AccountID) > 0 {
 			action = "BLOCK"
 			reasons = append(reasons, "repeated_suspicious_activity")
@@ -116,11 +148,9 @@ func (b *Blocker) decide(rr shared.RiskResult) shared.Decision {
 			action = "REVIEW"
 			reasons = append(reasons, fmt.Sprintf("high_risk_score:%.1f", rr.RiskScore))
 		}
-
 	case "MEDIUM":
 		action = "REVIEW"
 		reasons = append(reasons, fmt.Sprintf("medium_risk_score:%.1f", rr.RiskScore))
-
 	default:
 		action = "ALLOW"
 	}
@@ -137,18 +167,15 @@ func (b *Blocker) decide(rr shared.RiskResult) shared.Decision {
 }
 
 func (b *Blocker) saveDecision(d shared.Decision) {
-	// Сохраняем решение в Redis
 	key := fmt.Sprintf("decision:%s", d.TransactionID)
 	data, _ := json.Marshal(d)
 	b.rdb.Set(ctx, key, string(data), 7*24*time.Hour)
 
-	// Добавляем в общий список решений для веб-панели
 	listKey := "decisions:recent"
 	b.rdb.LPush(ctx, listKey, string(data))
-	b.rdb.LTrim(ctx, listKey, 0, 499) // последние 500
+	b.rdb.LTrim(ctx, listKey, 0, 499)
 	b.rdb.Expire(ctx, listKey, 24*time.Hour)
 
-	// Счётчики по действиям
 	b.rdb.Incr(ctx, fmt.Sprintf("stats:action:%s", d.Action))
 	b.rdb.Incr(ctx, fmt.Sprintf("stats:level:%s", d.RiskLevel))
 }

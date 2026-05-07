@@ -10,27 +10,30 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/go-redis/redis/v8"
 	"github.com/nats-io/nats.go"
 	"github.com/sleepysweety/fraud-detection/agents/shared"
 )
 
-var ctx = context.Background()
-
-// Веса для каждого фактора риска
-const (
-	weightFrequency  = 0.30
-	weightAmount     = 0.25
-	weightPatterns   = 0.25
-	weightGeo        = 0.10
-	weightTime       = 0.10
+var (
+	ctx    = context.Background()
+	tracer trace.Tracer
 )
 
-// Пороги уровней риска
 const (
-	thresholdLow      = 30.0
-	thresholdMedium   = 55.0
-	thresholdHigh     = 75.0
+	weightFrequency = 0.30
+	weightAmount    = 0.25
+	weightPatterns  = 0.25
+	weightGeo       = 0.10
+	weightTime      = 0.10
+
+	thresholdLow    = 30.0
+	thresholdMedium = 55.0
+	thresholdHigh   = 75.0
 )
 
 type Assessor struct {
@@ -39,6 +42,17 @@ type Assessor struct {
 }
 
 func main() {
+	var shutdown func()
+	var err error
+
+	tracer, shutdown, err = shared.InitTracer("risk-assessor")
+	if err != nil {
+		log.Printf("[RiskAssessor] WARN: трассировка недоступна: %v", err)
+		tracer = trace.NewNoopTracerProvider().Tracer("")
+		shutdown = func() {}
+	}
+	defer shutdown()
+
 	natsURL := getEnv("NATS_URL", nats.DefaultURL)
 	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
 
@@ -78,25 +92,40 @@ func main() {
 }
 
 func (a *Assessor) handleAnalyzed(msg *nats.Msg) {
+	_, span := tracer.Start(context.Background(), "transaction.assess_risk")
+	defer span.End()
+
 	var pr shared.PatternResult
 	if err := json.Unmarshal(msg.Data, &pr); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "invalid json")
 		log.Printf("[RiskAssessor] ERROR: невалидный JSON: %v", err)
 		return
 	}
 
 	result := a.assess(pr)
 
+	span.SetAttributes(
+		attribute.String("tx.id", pr.Transaction.ID),
+		attribute.Float64("tx.risk_score", result.RiskScore),
+		attribute.String("tx.risk_level", result.RiskLevel),
+	)
+
 	data, err := json.Marshal(result)
 	if err != nil {
+		span.RecordError(err)
 		log.Printf("[RiskAssessor] ERROR: ошибка сериализации: %v", err)
 		return
 	}
 
 	if err := a.nc.Publish(shared.SubjectTransactionsRisk, data); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "publish failed")
 		log.Printf("[RiskAssessor] ERROR: ошибка публикации: %v", err)
 		return
 	}
 
+	span.SetStatus(codes.Ok, result.RiskLevel)
 	log.Printf("[RiskAssessor] INFO: txID=%s score=%.1f level=%s",
 		pr.Transaction.ID, result.RiskScore, result.RiskLevel)
 }
@@ -104,40 +133,27 @@ func (a *Assessor) handleAnalyzed(msg *nats.Msg) {
 func (a *Assessor) assess(pr shared.PatternResult) shared.RiskResult {
 	tx := pr.Transaction
 
-	// 1. Частота транзакций → 0–100
 	freqScore := normalize(pr.FrequencyScore, 0, 20) * 100
-
-	// 2. Отклонение суммы → 0–100
 	amountScore := normalize(pr.AmountDeviation, 0, 10) * 100
-
-	// 3. Паттерны → каждый +20 очков, макс 100
 	patternScore := float64(len(pr.Patterns)) * 20
 	if patternScore > 100 {
 		patternScore = 100
 	}
-
-	// 4. Гео-риск по стране
 	geoScore := a.geoRisk(tx.CountryCode)
-
-	// 5. Временной риск
 	timeScore := timeRisk(tx.Timestamp)
 
-	// Взвешенная сумма
 	riskScore := freqScore*weightFrequency +
 		amountScore*weightAmount +
 		patternScore*weightPatterns +
 		geoScore*weightGeo +
 		timeScore*weightTime
 
-	// Учитываем историю блокировок аккаунта
 	riskScore += a.accountPenalty(tx.AccountID)
 	if riskScore > 100 {
 		riskScore = 100
 	}
 
 	level := riskLevel(riskScore)
-
-	// Сохраняем score в Redis для веб-панели
 	a.saveRiskScore(tx, riskScore, level)
 
 	return shared.RiskResult{
@@ -148,25 +164,18 @@ func (a *Assessor) assess(pr shared.PatternResult) shared.RiskResult {
 	}
 }
 
-// geoRisk возвращает риск-балл по стране (0–100)
 func (a *Assessor) geoRisk(country string) float64 {
-	highRisk := map[string]float64{
-		"NG": 90, "RO": 75, "PK": 70, "BD": 65,
-		"VN": 60, "UA": 55, "BY": 55,
-	}
-	mediumRisk := map[string]float64{
-		"CN": 40, "RU": 40, "IN": 35, "BR": 30,
-	}
+	highRisk := map[string]float64{"NG": 90, "RO": 75, "PK": 70, "BD": 65, "VN": 60, "UA": 55, "BY": 55}
+	mediumRisk := map[string]float64{"CN": 40, "RU": 40, "IN": 35, "BR": 30}
 	if v, ok := highRisk[country]; ok {
 		return v
 	}
 	if v, ok := mediumRisk[country]; ok {
 		return v
 	}
-	return 10 // низкий риск по умолчанию
+	return 10
 }
 
-// timeRisk возвращает риск по часу транзакции (0–100)
 func timeRisk(t time.Time) float64 {
 	hour := t.UTC().Hour()
 	if hour >= 1 && hour < 5 {
@@ -178,7 +187,6 @@ func timeRisk(t time.Time) float64 {
 	return 10
 }
 
-// accountPenalty возвращает штраф за прошлые блокировки аккаунта
 func (a *Assessor) accountPenalty(accountID string) float64 {
 	key := fmt.Sprintf("blocks:%s", accountID)
 	count, err := a.rdb.Get(ctx, key).Int64()
