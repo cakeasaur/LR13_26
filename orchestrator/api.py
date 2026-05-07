@@ -10,6 +10,7 @@ import redis.asyncio as aioredis
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
+from models import Transaction
 from orchestrator import Orchestrator
 
 log = logging.getLogger(__name__)
@@ -73,8 +74,6 @@ class StatsResponse(BaseModel):
 
 @app.post("/transactions", response_model=DecisionResponse, summary="Отправить транзакцию на проверку")
 async def submit_transaction(req: TransactionRequest):
-    from models import Transaction
-
     tx = Transaction(
         id=str(uuid.uuid4()),
         account_id=req.account_id,
