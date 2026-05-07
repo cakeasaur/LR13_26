@@ -125,6 +125,14 @@ async def get_stats():
     )
 
 
+@app.get("/transactions/{tx_id}/explanation", summary="LLM-объяснение решения")
+async def get_explanation(tx_id: str):
+    explanation = await rdb.get(f"explanation:{tx_id}")
+    if not explanation:
+        raise HTTPException(status_code=404, detail="Объяснение ещё не готово или транзакция не найдена")
+    return {"transaction_id": tx_id, "explanation": explanation}
+
+
 @app.get("/autoscale", summary="Статус автомасштабирования")
 async def autoscale_status():
     pending = int(await rdb.get("autoscale:pending") or 0)

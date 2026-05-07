@@ -1,6 +1,6 @@
 BIN_DIR := bin
 
-.PHONY: all build clean run-infra stop-infra run-agents run-api run-autoscaler run-auction run-demo
+.PHONY: all build clean run-infra stop-infra run-agents run-api run-autoscaler run-auction run-llm run-demo
 
 all: build
 
@@ -36,6 +36,9 @@ run-autoscaler:
 
 run-auction:
 	cd orchestrator && python3 auction.py
+
+run-llm:
+	cd orchestrator && python3 llm_agent.py
 
 run-demo:
 	cd orchestrator && python3 main.py
