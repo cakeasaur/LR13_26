@@ -23,16 +23,15 @@ func InitTracer(serviceName string) (trace.Tracer, func(), error) {
 		endpoint = "localhost:4317"
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	conn, err := grpc.DialContext(ctx, endpoint,
+	conn, err := grpc.NewClient(endpoint,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 	)
 	if err != nil {
 		return nil, func() {}, err
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	exporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithGRPCConn(conn))
 	if err != nil {
@@ -53,9 +52,13 @@ func InitTracer(serviceName string) (trace.Tracer, func(), error) {
 	otel.SetTracerProvider(tp)
 
 	shutdown := func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		tp.Shutdown(ctx)
+		if err := tp.Shutdown(shutCtx); err != nil {
+			// Логировать нельзя — log пакет не импортируем в shared,
+			// поэтому ошибку подавляем: shutdown вызывается при выходе.
+			_ = err
+		}
 		conn.Close()
 	}
 

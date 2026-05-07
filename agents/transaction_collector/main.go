@@ -69,7 +69,7 @@ func main() {
 }
 
 func handleTransaction(nc *nats.Conn, msg *nats.Msg) {
-	ctx, span := tracer.Start(context.Background(), "transaction.collect")
+	_, span := tracer.Start(context.Background(), "transaction.collect")
 	defer span.End()
 
 	var tx shared.Transaction
@@ -88,7 +88,7 @@ func handleTransaction(nc *nats.Conn, msg *nats.Msg) {
 		attribute.String("tx.currency", tx.Currency),
 	)
 
-	result := validate(ctx, tx)
+	result := validate(tx)
 
 	if !result.Valid {
 		span.SetAttributes(attribute.String("tx.reject_reason", result.Reason))
@@ -118,7 +118,7 @@ func handleTransaction(nc *nats.Conn, msg *nats.Msg) {
 		tx.ID, tx.AccountID, tx.Amount, tx.Currency)
 }
 
-func validate(_ context.Context, tx shared.Transaction) shared.ValidationResult {
+func validate(tx shared.Transaction) shared.ValidationResult {
 	if tx.ID == "" {
 		return shared.ValidationResult{Transaction: tx, Valid: false, Reason: "missing transaction id"}
 	}
