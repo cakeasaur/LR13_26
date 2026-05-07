@@ -23,10 +23,11 @@ TASK_TIMEOUT = 30  # секунд
 
 
 class Orchestrator:
-    def __init__(self):
+    def __init__(self, redis=None):
         self.nc: Optional[NATS] = None
         self._pending: Dict[str, asyncio.Future] = {}
         self._sub = None
+        self._redis = redis
 
     async def connect(self):
         nats_url = os.getenv("NATS_URL", "nats://localhost:4222")
@@ -61,6 +62,9 @@ class Orchestrator:
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[tx.id] = future
 
+        if self._redis:
+            await self._redis.incr("autoscale:pending")
+
         payload = json.dumps(tx.to_dict()).encode()
         await self.nc.publish(SUBJECT_INCOMING, payload)
         log.info("Отправлена txID=%s accountID=%s amount=%.2f %s",
@@ -80,6 +84,8 @@ class Orchestrator:
             )
         finally:
             self._pending.pop(tx.id, None)
+            if self._redis:
+                await self._redis.decr("autoscale:pending")
 
     async def _on_decision(self, msg):
         try:

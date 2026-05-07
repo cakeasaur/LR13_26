@@ -1,6 +1,6 @@
 BIN_DIR := bin
 
-.PHONY: all build clean run-infra stop-infra run-agents run-api run-demo
+.PHONY: all build clean run-infra stop-infra run-agents run-api run-autoscaler run-demo
 
 all: build
 
@@ -30,6 +30,9 @@ run-agents: build
 
 run-api:
 	cd orchestrator && uvicorn api:app --host 0.0.0.0 --port 8080 --reload
+
+run-autoscaler:
+	cd orchestrator && python3 autoscaler.py
 
 run-demo:
 	cd orchestrator && python3 main.py

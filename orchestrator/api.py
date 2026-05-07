@@ -21,10 +21,10 @@ rdb: Optional[aioredis.Redis] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global orch, rdb
-    orch = Orchestrator()
-    await orch.connect()
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
     rdb = aioredis.from_url(redis_url, decode_responses=True)
+    orch = Orchestrator(redis=rdb)
+    await orch.connect()
     log.info("API запущен")
     yield
     await orch.disconnect()
@@ -123,6 +123,16 @@ async def get_stats():
         review=review,
         total=allowed + blocked + review,
     )
+
+
+@app.get("/autoscale", summary="Статус автомасштабирования")
+async def autoscale_status():
+    pending = int(await rdb.get("autoscale:pending") or 0)
+    agents = ["transaction_collector", "pattern_analyzer", "risk_assessor", "blocker"]
+    instances = {}
+    for name in agents:
+        instances[name] = int(await rdb.get(f"autoscale:instances:{name}") or 0)
+    return {"pending": pending, "instances": instances}
 
 
 @app.get("/health", summary="Health check")
