@@ -48,6 +48,9 @@ class AuctionCoordinator:
         return bids
 
     async def _on_validated(self, msg):
+        asyncio.create_task(self._run_auction(msg))
+
+    async def _run_auction(self, msg):
         try:
             tx_id = json.loads(msg.data.decode()).get("transaction", {}).get("id", "?")
         except (json.JSONDecodeError, UnicodeDecodeError):

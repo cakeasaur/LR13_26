@@ -55,7 +55,10 @@ class Autoscaler:
 
     async def _save_counts(self):
         for name in AGENT_IMAGES:
-            await self.redis.set(f"autoscale:instances:{name}", len(self._alive(name)))
+            await self.redis.set(
+                f"autoscale:instances:{name}",
+                len(await asyncio.to_thread(self._alive, name)),
+            )
 
     # ── Container helpers ──────────────────────────────────────────────────────
 
@@ -116,11 +119,11 @@ class Autoscaler:
         log.info("pending=%d", pending)
 
         for name in AGENT_IMAGES:
-            extra = len(self._alive(name))
+            extra = len(await asyncio.to_thread(self._alive, name))
             if pending > SCALE_UP_THRESHOLD and extra < MAX_EXTRA_INSTANCES:
-                self._spawn(name)
+                await asyncio.to_thread(self._spawn, name)
             elif pending < SCALE_DOWN_THRESHOLD and extra > 0:
-                self._kill_one(name)
+                await asyncio.to_thread(self._kill_one, name)
 
         await self._save_counts()
 

@@ -3,13 +3,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from autoscaler import Autoscaler
+from docker.errors import NotFound
 
 
 def make_scaler(pending_value=None):
     mock_redis = AsyncMock()
     mock_redis.get.return_value = pending_value
     mock_redis.set = AsyncMock()
-    return Autoscaler(mock_redis), mock_redis
+    with patch("autoscaler.docker.from_env"):
+        scaler = Autoscaler(mock_redis)
+    return scaler, mock_redis
 
 
 @pytest.mark.asyncio
@@ -33,18 +36,21 @@ async def test_pending_negative_clamped_to_zero():
 def test_alive_filters_dead_processes():
     scaler, _ = make_scaler()
 
-    alive_proc = MagicMock()
-    alive_proc.poll.return_value = None  # ещё жив
+    alive_c = MagicMock()
+    alive_c.status = "running"
 
-    dead_proc = MagicMock()
-    dead_proc.poll.return_value = 1  # завершился
+    dead_c = MagicMock()
+    dead_c.status = "exited"
 
-    scaler._extra["blocker"] = [alive_proc, dead_proc]
+    scaler._docker.containers.get.side_effect = (
+        lambda cid: alive_c if cid == "alive-id" else dead_c
+    )
+    scaler._extra["blocker"] = ["alive-id", "dead-id"]
+
     result = scaler._alive("blocker")
 
-    assert len(result) == 1
-    assert result[0] is alive_proc
-    assert scaler._extra["blocker"] == [alive_proc]
+    assert result == ["alive-id"]
+    assert scaler._extra["blocker"] == ["alive-id"]
 
 
 @pytest.mark.asyncio
@@ -54,7 +60,6 @@ async def test_tick_scale_up_when_pending_high():
 
     with patch.object(scaler, "_spawn") as mock_spawn:
         await scaler.tick()
-        # должен попытаться запустить инстанс для каждого агента
         assert mock_spawn.call_count == 4
 
 
@@ -73,13 +78,11 @@ async def test_tick_scale_down_removes_extra():
     scaler, mock_redis = make_scaler("0")  # pending < SCALE_DOWN_THRESHOLD(2)
     mock_redis.set = AsyncMock()
 
-    # добавляем по одному живому доп. процессу на каждый агент
     for name in scaler._extra:
-        proc = MagicMock()
-        proc.poll.return_value = None
-        scaler._extra[name] = [proc]
+        scaler._extra[name] = ["fake-container-id"]
 
-    with patch.object(scaler, "_kill_one") as mock_kill:
+    with patch.object(scaler, "_alive", return_value=["fake-container-id"]), \
+         patch.object(scaler, "_kill_one") as mock_kill:
         await scaler.tick()
         assert mock_kill.call_count == 4
 
@@ -87,9 +90,9 @@ async def test_tick_scale_down_removes_extra():
 def test_shutdown_terminates_alive_processes():
     scaler, _ = make_scaler()
 
-    proc = MagicMock()
-    proc.poll.return_value = None
-    scaler._extra["blocker"] = [proc]
+    container_mock = MagicMock()
+    scaler._docker.containers.get.return_value = container_mock
+    scaler._extra["blocker"] = ["fake-container-id"]
 
     scaler.shutdown()
-    proc.send_signal.assert_called_once()
+    container_mock.stop.assert_called_once()

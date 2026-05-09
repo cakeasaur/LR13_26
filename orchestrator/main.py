@@ -5,7 +5,7 @@
 import asyncio
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from orchestrator import Orchestrator
 from models import Transaction
@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 def make_tx(**kwargs) -> Transaction:
     return Transaction(
         id=str(uuid.uuid4()),
-        timestamp=datetime.utcnow().isoformat() + "Z",
+        timestamp=datetime.now(timezone.utc).isoformat(),
         **kwargs,
     )
 
