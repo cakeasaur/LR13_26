@@ -91,7 +91,7 @@ flowchart TD
 |---|---|
 | **Orchestrator** | Отправляет транзакцию в pipeline, ждёт решение (timeout 30 с, retry ×3) |
 | **AuctionCoordinator** | Перехватывает `transactions.validated`, проводит аукцион среди PatternAnalyzer-инстансов (300 мс), роутит победителю |
-| **Autoscaler** | Мониторит `autoscale:pending` в Redis каждые 5 с; если > 5 — запускает доп. агентов (max +2), если < 2 — останавливает |
+| **Autoscaler** | Мониторит `autoscale:pending` в Redis каждые 5 с; если > 5 — запускает доп. контейнеры агентов через Docker SDK (`docker.from_env()`), если < 2 — останавливает |
 | **LLM Agent** | Подписывается на `transactions.decision`, генерирует объяснение через Ollama llama3.2, сохраняет в Redis |
 | **Streamlit Dashboard** | Метрики ALLOW/BLOCK/REVIEW, таблица последних транзакций, LLM-объяснение по клику, статус autoscaler/auction |
 
@@ -109,15 +109,29 @@ flowchart TD
 
 ### Требования
 
-- Go 1.26+
-- Python 3.11+
-- Docker + Docker Compose
-- Ollama (установлен через `brew install ollama`)
+- Docker + Docker Compose (обязательно)
+- Ollama — для LLM-агента (опционально): `ollama pull llama3.2`
+- Go 1.23+ и Python 3.11+ — только для локального запуска без Docker
 
-### Запуск
+### Запуск через Docker Compose (рекомендуется)
 
 ```bash
-# 1. Инфраструктура
+# Собрать образы и поднять всю систему одной командой
+docker compose up --build
+
+# Остановить
+docker compose down
+```
+
+Поднимается автоматически: NATS · Redis · Jaeger · все 4 Go-агента · AuctionCoordinator · FastAPI · LLM Agent · Autoscaler · Streamlit Dashboard.
+
+> **LLM Agent** пытается подключиться к Ollama на `host.docker.internal:11434`.  
+> Если Ollama не запущена — агент работает в деградированном режиме (без объяснений), остальная система не затронута.
+
+### Локальный запуск (без Docker для агентов)
+
+```bash
+# 1. Инфраструктура (NATS + Redis + Jaeger)
 make run-infra
 
 # 2. Собрать и запустить Go-агентов
@@ -198,7 +212,10 @@ curl -X POST http://localhost:8080/transactions \
 ```
 fraud-detection-system/
 ├── agents/
-│   ├── shared/                  # общие типы и OTel-инициализация
+│   ├── shared/
+│   │   ├── types.go             # общие типы (Transaction, Decision, …)
+│   │   ├── telemetry.go         # OTel TracerProvider + W3C TextMapPropagator
+│   │   └── nats_propagation.go  # InjectContext / ExtractContext / PublishWithContext
 │   ├── transaction_collector/   # Go-агент + тесты
 │   ├── pattern_analyzer/        # Go-агент (аукцион: bid + worker inbox)
 │   ├── risk_assessor/           # Go-агент + тесты
@@ -207,15 +224,17 @@ fraud-detection-system/
 │   ├── api.py                   # FastAPI REST API
 │   ├── orchestrator.py          # pipeline + pending-трекинг
 │   ├── auction.py               # AuctionCoordinator
-│   ├── autoscaler.py            # Autoscaler
+│   ├── autoscaler.py            # Autoscaler (Docker SDK)
 │   ├── llm_agent.py             # LLM Agent (Ollama)
 │   ├── dashboard.py             # Streamlit Dashboard
 │   ├── models.py                # Transaction / Decision dataclasses
 │   ├── test_models.py           # pytest
 │   ├── test_llm_agent.py        # pytest
 │   ├── test_autoscaler.py       # pytest
+│   ├── Dockerfile               # образ для Python-сервисов
 │   └── requirements.txt
-├── docker-compose.yml           # NATS + Redis + Jaeger
+├── Dockerfile.agents            # multi-stage build для Go-агентов (ARG AGENT_NAME)
+├── docker-compose.yml           # вся система: инфра + агенты + Python-сервисы
 ├── Makefile
 └── go.mod
 ```
@@ -230,7 +249,7 @@ fraud-detection-system/
 | 2 | **Цепочки задач (pipeline)** | `incoming → validated → auction → worker.{id} → analyzed → risk → decision`; оркестратор на Python с retry ×3 и timeout 30 с | ✅ |
 | 3 | **Распределённая трассировка (Jaeger)** | OpenTelemetry + OTLP gRPC во всех 4 агентах; дочерние spans для каждой проверки; Jaeger в Docker на `:16686` | ✅ |
 | 4 | **Агент с состоянием (Redis)** | PatternAnalyzer хранит частоту транзакций (sorted set) и историю сумм (list); Blocker — историю блокировок; при перезапуске состояние восстанавливается | ✅ |
-| 5 | **Динамическое масштабирование** | Autoscaler мониторит `autoscale:pending` в Redis каждые 5 с; при > 5 запускает доп. инстансы агентов (max +2), при < 2 — останавливает | ✅ |
+| 5 | **Динамическое масштабирование** | Autoscaler мониторит `autoscale:pending` в Redis каждые 5 с; при > 5 запускает доп. контейнеры агентов через **Docker SDK** (`docker.from_env()`), при < 2 — останавливает через `container.stop()` | ✅ |
 | 6 | **Аукционное распределение задач** | AuctionCoordinator перехватывает validated-транзакции, собирает ставки от PatternAnalyzer-инстансов 300 мс, роутит победителю с минимальной нагрузкой | ✅ |
 | 7 | **Интеграция LLM-агента** | Python-агент подписывается на решения, генерирует объяснение через Ollama llama3.2, сохраняет в Redis; доступно через `GET /transactions/{id}/explanation` | ✅ |
 | 8 | **Веб-интерфейс мониторинга** | Streamlit Dashboard `:8501` — метрики ALLOW/BLOCK/REVIEW, таблица транзакций, LLM-объяснение по клику, статус autoscaler и аукциона, авто-обновление каждые 5 с | ✅ |
