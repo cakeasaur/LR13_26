@@ -69,7 +69,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("[PatternAnalyzer] Ошибка подключения к NATS: %v", err)
 	}
-	defer nc.Close()
+	defer func() {
+		if err := nc.Drain(); err != nil {
+			log.Printf("[PatternAnalyzer] WARN: drain error: %v", err)
+		}
+	}()
 
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 	if err := rdb.Ping(ctx).Err(); err != nil {
@@ -122,7 +126,9 @@ func main() {
 }
 
 func (a *Analyzer) handleValidated(msg *nats.Msg) {
-	spanCtx, span := tracer.Start(a.ctx, "transaction.analyze_patterns")
+	// Восстанавливаем родительский span из заголовков — связываем с collector'ом
+	ctx := shared.ExtractContext(a.ctx, msg)
+	spanCtx, span := tracer.Start(ctx, "transaction.analyze_patterns")
 	defer span.End()
 
 	var vr shared.ValidationResult
@@ -156,7 +162,7 @@ func (a *Analyzer) handleValidated(msg *nats.Msg) {
 		return
 	}
 
-	if err := a.nc.Publish(shared.SubjectTransactionsAnalyzed, data); err != nil {
+	if err := shared.PublishWithContext(spanCtx, a.nc, shared.SubjectTransactionsAnalyzed, data); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "publish failed")
 		log.Printf("[PatternAnalyzer] ERROR: ошибка публикации: %v", err)

@@ -57,7 +57,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("[Blocker] Ошибка подключения к NATS: %v", err)
 	}
-	defer nc.Close()
+	defer func() {
+		if err := nc.Drain(); err != nil {
+			log.Printf("[Blocker] WARN: drain error: %v", err)
+		}
+	}()
 
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 	if err := rdb.Ping(ctx).Err(); err != nil {
@@ -87,7 +91,8 @@ func main() {
 }
 
 func (b *Blocker) handleRisk(msg *nats.Msg) {
-	_, span := tracer.Start(b.ctx, "transaction.block_decision")
+	ctx := shared.ExtractContext(b.ctx, msg)
+	ctx, span := tracer.Start(ctx, "transaction.block_decision")
 	defer span.End()
 
 	var rr shared.RiskResult
@@ -115,7 +120,7 @@ func (b *Blocker) handleRisk(msg *nats.Msg) {
 		return
 	}
 
-	if err := b.nc.Publish(shared.SubjectTransactionsDecision, data); err != nil {
+	if err := shared.PublishWithContext(ctx, b.nc, shared.SubjectTransactionsDecision, data); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "publish failed")
 		log.Printf("[Blocker] ERROR: ошибка публикации: %v", err)

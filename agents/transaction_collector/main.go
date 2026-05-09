@@ -49,7 +49,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("[CollectorAgent] Ошибка подключения к NATS: %v", err)
 	}
-	defer nc.Close()
+	defer func() {
+		if err := nc.Drain(); err != nil {
+			log.Printf("[CollectorAgent] WARN: drain error: %v", err)
+		}
+	}()
 
 	log.Printf("[CollectorAgent] Подключён к NATS: %s", natsURL)
 
@@ -73,6 +77,8 @@ func main() {
 }
 
 func handleTransaction(ctx context.Context, nc *nats.Conn, msg *nats.Msg) {
+	// Извлекаем родительский span из заголовков входящего сообщения (если есть)
+	ctx = shared.ExtractContext(ctx, msg)
 	_, span := tracer.Start(ctx, "transaction.collect")
 	defer span.End()
 
@@ -109,7 +115,7 @@ func handleTransaction(ctx context.Context, nc *nats.Conn, msg *nats.Msg) {
 		return
 	}
 
-	if err := nc.Publish(shared.SubjectTransactionsValidated, data); err != nil {
+	if err := shared.PublishWithContext(ctx, nc, shared.SubjectTransactionsValidated, data); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "publish failed")
 		log.Printf("[CollectorAgent] ERROR: ошибка публикации: %v", err)

@@ -65,7 +65,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("[RiskAssessor] Ошибка подключения к NATS: %v", err)
 	}
-	defer nc.Close()
+	defer func() {
+		if err := nc.Drain(); err != nil {
+			log.Printf("[RiskAssessor] WARN: drain error: %v", err)
+		}
+	}()
 
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 	if err := rdb.Ping(ctx).Err(); err != nil {
@@ -94,7 +98,8 @@ func main() {
 }
 
 func (a *Assessor) handleAnalyzed(msg *nats.Msg) {
-	_, span := tracer.Start(a.ctx, "transaction.assess_risk")
+	ctx := shared.ExtractContext(a.ctx, msg)
+	ctx, span := tracer.Start(ctx, "transaction.assess_risk")
 	defer span.End()
 
 	var pr shared.PatternResult
@@ -120,7 +125,7 @@ func (a *Assessor) handleAnalyzed(msg *nats.Msg) {
 		return
 	}
 
-	if err := a.nc.Publish(shared.SubjectTransactionsRisk, data); err != nil {
+	if err := shared.PublishWithContext(ctx, a.nc, shared.SubjectTransactionsRisk, data); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "publish failed")
 		log.Printf("[RiskAssessor] ERROR: ошибка публикации: %v", err)

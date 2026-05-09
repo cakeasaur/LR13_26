@@ -1,0 +1,31 @@
+# Multi-stage build для Go-агентов.
+# Собирает один бинарник, указанный через ARG AGENT_NAME.
+#
+# Пример сборки:
+#   docker build --build-arg AGENT_NAME=transaction_collector \
+#                -t lr13_26-transaction_collector .
+#
+# docker-compose вызывает этот файл для каждого сервиса автоматически.
+
+FROM golang:1.23-alpine AS builder
+
+WORKDIR /app
+
+# Кэшируем зависимости отдельным слоем
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY agents/ agents/
+
+ARG AGENT_NAME
+RUN CGO_ENABLED=0 GOOS=linux \
+    go build -trimpath -o /app/agent ./agents/${AGENT_NAME}
+
+# ── Runtime image ──────────────────────────────────────────────────────────────
+FROM alpine:3.19
+
+RUN apk --no-cache add ca-certificates tzdata
+
+COPY --from=builder /app/agent /agent
+
+ENTRYPOINT ["/agent"]

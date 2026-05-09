@@ -1,4 +1,7 @@
 services:
+
+  # ── Инфраструктура ────────────────────────────────────────────────────────────
+
   nats:
     image: nats:2-alpine
     container_name: fraud_nats
@@ -57,6 +60,199 @@ services:
       timeout: 3s
       retries: 5
       start_period: 10s
+
+  # ── Go-агенты ─────────────────────────────────────────────────────────────────
+
+  transaction_collector:
+    build:
+      context: .
+      dockerfile: Dockerfile.agents
+      args:
+        AGENT_NAME: transaction_collector
+    image: lr13_26-transaction_collector
+    environment:
+      NATS_URL: nats://nats:4222
+      REDIS_ADDR: redis:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
+    networks:
+      - fraud-network
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_healthy
+    restart: unless-stopped
+
+  pattern_analyzer:
+    build:
+      context: .
+      dockerfile: Dockerfile.agents
+      args:
+        AGENT_NAME: pattern_analyzer
+    image: lr13_26-pattern_analyzer
+    environment:
+      NATS_URL: nats://nats:4222
+      REDIS_ADDR: redis:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
+    networks:
+      - fraud-network
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_healthy
+    restart: unless-stopped
+
+  risk_assessor:
+    build:
+      context: .
+      dockerfile: Dockerfile.agents
+      args:
+        AGENT_NAME: risk_assessor
+    image: lr13_26-risk_assessor
+    environment:
+      NATS_URL: nats://nats:4222
+      REDIS_ADDR: redis:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
+    networks:
+      - fraud-network
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_healthy
+    restart: unless-stopped
+
+  blocker:
+    build:
+      context: .
+      dockerfile: Dockerfile.agents
+      args:
+        AGENT_NAME: blocker
+    image: lr13_26-blocker
+    environment:
+      NATS_URL: nats://nats:4222
+      REDIS_ADDR: redis:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
+    networks:
+      - fraud-network
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Python-сервисы ────────────────────────────────────────────────────────────
+
+  auction:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+    image: lr13_26-orchestrator
+    command: python auction.py
+    environment:
+      NATS_URL: nats://nats:4222
+      REDIS_URL: redis://redis:6379
+    networks:
+      - fraud-network
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      pattern_analyzer:
+        condition: service_started
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+    image: lr13_26-orchestrator
+    command: uvicorn api:app --host 0.0.0.0 --port 8080
+    ports:
+      - "8080:8080"
+    environment:
+      NATS_URL: nats://nats:4222
+      REDIS_URL: redis://redis:6379
+    networks:
+      - fraud-network
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  llm_agent:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+    image: lr13_26-orchestrator
+    command: python llm_agent.py
+    environment:
+      NATS_URL: nats://nats:4222
+      REDIS_URL: redis://redis:6379
+      OLLAMA_URL: "${OLLAMA_URL:-http://host.docker.internal:11434}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-llama3.2}"
+    networks:
+      - fraud-network
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  autoscaler:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+    image: lr13_26-orchestrator
+    command: python autoscaler.py
+    environment:
+      NATS_URL: nats://nats:4222
+      REDIS_URL: redis://redis:6379
+      REDIS_ADDR: redis:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
+      DOCKER_NETWORK: lr13_26_fraud-network
+    volumes:
+      # Даём автоскейлеру доступ к Docker daemon
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - fraud-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+    image: lr13_26-orchestrator
+    command: streamlit run dashboard.py --server.port 8501 --browser.gatherUsageStats false
+    ports:
+      - "8501:8501"
+    environment:
+      REDIS_URL: redis://redis:6379
+    networks:
+      - fraud-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   nats_data:
