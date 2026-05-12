@@ -135,8 +135,8 @@ class Autoscaler:
         while True:
             try:
                 await self.tick()
-            except Exception as exc:
-                log.error("Ошибка тика: %s", exc)
+            except Exception:
+                log.exception("Ошибка тика")
             await asyncio.sleep(POLL_INTERVAL)
 
     def shutdown(self):
