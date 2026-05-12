@@ -135,31 +135,32 @@ func (b *Blocker) handleRisk(msg *nats.Msg) {
 		decision.TransactionID, decision.AccountID, decision.RiskScore, decision.RiskLevel, decision.Action)
 }
 
+// decideAction — чистая функция принятия решения по риск-уровню и истории блокировок.
+// Вынесена отдельно от Redis-операций для возможности юнит-тестирования.
+func decideAction(riskLevel string, riskScore float64, prevBlockCount int64) (action string, extraReasons []string) {
+	switch riskLevel {
+	case "CRITICAL":
+		return "BLOCK", []string{fmt.Sprintf("critical_risk_score:%.1f", riskScore)}
+	case "HIGH":
+		if prevBlockCount > 0 {
+			return "BLOCK", []string{"repeated_suspicious_activity"}
+		}
+		return "REVIEW", []string{fmt.Sprintf("high_risk_score:%.1f", riskScore)}
+	case "MEDIUM":
+		return "REVIEW", []string{fmt.Sprintf("medium_risk_score:%.1f", riskScore)}
+	default:
+		return "ALLOW", nil
+	}
+}
+
 func (b *Blocker) decide(rr shared.RiskResult) shared.Decision {
 	tx := rr.Transaction
-	var reasons []string
-	action := "ALLOW"
+	reasons := append([]string{}, rr.Patterns.Patterns...)
 
-	reasons = append(reasons, rr.Patterns.Patterns...)
-
-	switch rr.RiskLevel {
-	case "CRITICAL":
-		action = "BLOCK"
-		reasons = append(reasons, fmt.Sprintf("critical_risk_score:%.1f", rr.RiskScore))
+	action, extra := decideAction(rr.RiskLevel, rr.RiskScore, b.previousBlockCount(tx.AccountID))
+	reasons = append(reasons, extra...)
+	if action == "BLOCK" && rr.RiskLevel == "CRITICAL" {
 		b.incrementBlockCount(tx.AccountID)
-	case "HIGH":
-		if b.previousBlockCount(tx.AccountID) > 0 {
-			action = "BLOCK"
-			reasons = append(reasons, "repeated_suspicious_activity")
-		} else {
-			action = "REVIEW"
-			reasons = append(reasons, fmt.Sprintf("high_risk_score:%.1f", rr.RiskScore))
-		}
-	case "MEDIUM":
-		action = "REVIEW"
-		reasons = append(reasons, fmt.Sprintf("medium_risk_score:%.1f", rr.RiskScore))
-	default:
-		action = "ALLOW"
 	}
 
 	return shared.Decision{
