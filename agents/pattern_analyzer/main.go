@@ -174,40 +174,42 @@ func (a *Analyzer) handleValidated(msg *nats.Msg) {
 		workerID[:8], tx.ID, result.Suspicious, result.Patterns, result.FrequencyScore)
 }
 
-func (a *Analyzer) analyze(spanCtx context.Context, tx shared.Transaction) shared.PatternResult {
+// detectPatterns — чистая функция: возвращает список флагов по числовым метрикам
+// и параметрам транзакции. Вынесена отдельно от Redis-IO для юнит-тестов.
+func detectPatterns(tx shared.Transaction, freqScore, amountDev float64) []string {
 	var patterns []string
-	freqScore := 0.0
-	amountDev := 0.0
-
-	_, freqSpan := tracer.Start(spanCtx, "check.frequency")
-	freqScore = a.checkFrequency(tx)
-	freqSpan.End()
 	if freqScore > 5 {
 		patterns = append(patterns, fmt.Sprintf("high_frequency:%.0f_per_min", freqScore))
 	}
-
-	_, amtSpan := tracer.Start(spanCtx, "check.amount_deviation")
-	amountDev = a.checkAmountDeviation(tx)
-	amtSpan.End()
 	if amountDev > 3.0 {
 		patterns = append(patterns, fmt.Sprintf("amount_deviation:%.1fx", amountDev))
 	}
-
 	hour := tx.Timestamp.UTC().Hour()
 	if hour >= 0 && hour < 5 {
 		patterns = append(patterns, "unusual_hour")
 	}
-
 	if tx.Amount > 10000 {
 		patterns = append(patterns, "large_amount")
 	}
+	return patterns
+}
+
+func (a *Analyzer) analyze(spanCtx context.Context, tx shared.Transaction) shared.PatternResult {
+	_, freqSpan := tracer.Start(spanCtx, "check.frequency")
+	freqScore := a.checkFrequency(tx)
+	freqSpan.End()
+
+	_, amtSpan := tracer.Start(spanCtx, "check.amount_deviation")
+	amountDev := a.checkAmountDeviation(tx)
+	amtSpan.End()
+
+	patterns := detectPatterns(tx, freqScore, amountDev)
 
 	a.saveToHistory(tx)
 
-	suspicious := len(patterns) > 0
 	return shared.PatternResult{
 		Transaction:     tx,
-		Suspicious:      suspicious,
+		Suspicious:      len(patterns) > 0,
 		Patterns:        patterns,
 		FrequencyScore:  freqScore,
 		AmountDeviation: amountDev,
